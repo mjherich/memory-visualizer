@@ -133,6 +133,13 @@ const KnowledgeGraphVisualization = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [zoomLevel, setZoomLevel] = useState(1);
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    // Check for saved theme preference or default to system preference
+    const saved = localStorage.getItem('theme');
+    if (saved) return saved === 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
+  const [showHelp, setShowHelp] = useState(false);
 
   // Function to parse the JSON file
   const parseMemoryJson = (content: string) => {
@@ -560,7 +567,7 @@ const KnowledgeGraphVisualization = () => {
         if (relation && relationMatchesSearch(relation)) {
           return "#FFD700";
         }
-        return "#666";
+        return isDarkMode ? "#9ca3af" : "#666";
       })
       .attr("font-weight", (d) => {
         // Bold text for search matches
@@ -664,7 +671,8 @@ const KnowledgeGraphVisualization = () => {
       })
       .attr("fill", (d) => {
         // Highlight text color for search matches
-        return nodeMatchesSearch(d) ? "#FFD700" : "#333";
+        if (nodeMatchesSearch(d)) return "#FFD700";
+        return isDarkMode ? "#e5e7eb" : "#333";
       });
 
     // Add titles for hover with connection info
@@ -937,8 +945,8 @@ const KnowledgeGraphVisualization = () => {
     
     const img = new Image();
     img.onload = () => {
-      // Set white background
-      context.fillStyle = "white";
+      // Set background color based on theme
+      context.fillStyle = isDarkMode ? "#1f2937" : "white";
       context.fillRect(0, 0, canvas.width, canvas.height);
       
       // Draw the image scaled
@@ -964,6 +972,117 @@ const KnowledgeGraphVisualization = () => {
     img.src = url;
   };
 
+  // Theme toggle function
+  const toggleTheme = () => {
+    const newTheme = !isDarkMode;
+    setIsDarkMode(newTheme);
+    localStorage.setItem('theme', newTheme ? 'dark' : 'light');
+  };
+
+  // Keyboard shortcuts handler
+  const handleKeyDown = useCallback((event: KeyboardEvent) => {
+    // Don't trigger shortcuts when typing in inputs
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
+      if (event.key === 'Escape') {
+        (event.target as HTMLElement).blur();
+      }
+      return;
+    }
+
+    const isCtrlOrCmd = event.ctrlKey || event.metaKey;
+    
+    switch (event.key.toLowerCase()) {
+      case '?':
+      case 'h':
+        if (!isCtrlOrCmd) {
+          setShowHelp(!showHelp);
+          event.preventDefault();
+        }
+        break;
+      case 'escape':
+        setShowHelp(false);
+        dispatchHistory({ type: 'clear' });
+        event.preventDefault();
+        break;
+      case 'f':
+        if (!isCtrlOrCmd) {
+          handleFitToScreen();
+          event.preventDefault();
+        }
+        break;
+      case 'r':
+        if (!isCtrlOrCmd) {
+          handleResetZoom();
+          event.preventDefault();
+        }
+        break;
+      case '=':
+      case '+':
+        if (isCtrlOrCmd) {
+          handleZoomIn();
+          event.preventDefault();
+        }
+        break;
+      case '-':
+        if (isCtrlOrCmd) {
+          handleZoomOut();
+          event.preventDefault();
+        }
+        break;
+      case 't':
+        if (!isCtrlOrCmd) {
+          toggleTheme();
+          event.preventDefault();
+        }
+        break;
+      case 'arrowleft':
+        if (event.altKey) {
+          dispatchHistory({ type: 'back' });
+          event.preventDefault();
+        }
+        break;
+      case 'arrowright':
+        if (event.altKey) {
+          dispatchHistory({ type: 'forward' });
+          event.preventDefault();
+        }
+        break;
+      case '/':
+        if (!isCtrlOrCmd) {
+          const searchInput = document.getElementById('search') as HTMLInputElement;
+          if (searchInput) {
+            searchInput.focus();
+            event.preventDefault();
+          }
+        }
+        break;
+    }
+  }, [showHelp, handleFitToScreen, handleResetZoom, handleZoomIn, handleZoomOut, toggleTheme, dispatchHistory]);
+
+  // Add keyboard event listeners
+  useEffect(() => {
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [handleKeyDown]);
+
+  // Theme-aware styling helpers
+  const getThemeClasses = () => ({
+    bg: isDarkMode ? 'bg-gray-900' : 'bg-gray-50',
+    cardBg: isDarkMode ? 'bg-gray-800' : 'bg-white',
+    panelBg: isDarkMode ? 'bg-gray-700' : 'bg-purple-50',
+    border: isDarkMode ? 'border-gray-600' : 'border-gray-300',
+    text: isDarkMode ? 'text-gray-100' : 'text-gray-900',
+    textSecondary: isDarkMode ? 'text-gray-300' : 'text-gray-600',
+    textMuted: isDarkMode ? 'text-gray-400' : 'text-gray-500',
+    button: isDarkMode ? 'bg-gray-700 hover:bg-gray-600 text-gray-100' : 'bg-gray-200 hover:bg-gray-300 text-gray-700',
+    input: isDarkMode ? 'bg-gray-700 border-gray-600 text-gray-100' : 'bg-white border-gray-300 text-gray-900',
+    svgBg: isDarkMode ? 'bg-gray-800' : 'bg-white',
+  });
+
+  const theme = getThemeClasses();
+
   // Reset the visualization
   const resetVisualization = () => {
     setGraphData(null);
@@ -976,19 +1095,38 @@ const KnowledgeGraphVisualization = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50">
+    <div className={`flex flex-col h-screen ${theme.bg}`}>
       {!graphData ? (
-        <div className="flex flex-col items-center justify-center h-screen bg-gray-50 p-8">
+        <div className={`flex flex-col items-center justify-center h-screen ${theme.bg} p-8`}>
+          {/* Theme Toggle */}
+          <div className="absolute top-4 right-4">
+            <button
+              onClick={toggleTheme}
+              className={`p-2 rounded-lg ${theme.button} transition-colors`}
+              title={isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
+            >
+              {isDarkMode ? (
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+              ) : (
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                </svg>
+              )}
+            </button>
+          </div>
+
           <div className="text-center mb-8">
             <div className="flex justify-center mb-4">
               <svg className="w-24 h-24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
                 <path fill="none" stroke="#9370db" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 19a2 2 0 0 1-2-2v-4l-1-1l1-1V7a2 2 0 0 1 2-2m6 6.875l3-1.687m-3 1.687v3.375m0-3.375l-3-1.687m3 1.687l3 1.688M12 8.5v3.375m0 0l-3 1.688M18 19a2 2 0 0 0 2-2v-4l1-1l-1-1V7a2 2 0 0 0-2-2"/>
               </svg>
             </div>
-            <h1 className="text-3xl font-bold mb-4">
+            <h1 className={`text-3xl font-bold mb-4 ${theme.text}`}>
               Anthropic Memory Visualizer
             </h1>
-            <p className="text-lg text-gray-600">
+            <p className={`text-lg ${theme.textSecondary}`}>
               Explore and analyze knowledge graphs from Anthropic's Memory MCP
             </p>
             <span>
@@ -1052,8 +1190,8 @@ const KnowledgeGraphVisualization = () => {
           <div
             className={`border-4 border-dashed rounded-lg p-12 w-full max-w-xl flex flex-col items-center justify-center transition-colors ${
               isDragging
-                ? "border-blue-500 bg-blue-50"
-                : "border-gray-300 bg-white"
+                ? "border-blue-500 bg-blue-50 dark:bg-blue-900"
+                : `${theme.border} ${theme.cardBg}`
             }`}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -1177,21 +1315,21 @@ const KnowledgeGraphVisualization = () => {
         </div>
       ) : (
         <div className="flex flex-col h-screen">
-          <div className="bg-white p-4 border-b border-gray-300 shadow-sm">
+          <div className={`${theme.cardBg} p-4 border-b ${theme.border} shadow-sm`}>
             <div className="flex justify-between items-center mb-4">
               <div className="flex items-center space-x-2">
                 {/* Back/Forward navigation */}
                 <button
                   onClick={() => dispatchHistory({ type: 'back' })}
                   disabled={index <= 0}
-                  className="p-1 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 rounded"
+                  className={`p-1 ${theme.button} disabled:opacity-50 disabled:cursor-not-allowed rounded`}
                 >
                   &larr;
                 </button>
                 <button
                   onClick={() => dispatchHistory({ type: 'forward' })}
                   disabled={index >= history.length - 1}
-                  className="p-1 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 rounded"
+                  className={`p-1 ${theme.button} disabled:opacity-50 disabled:cursor-not-allowed rounded`}
                 >
                   &rarr;
                 </button>
@@ -1209,11 +1347,39 @@ const KnowledgeGraphVisualization = () => {
                     d="M6 19a2 2 0 0 1-2-2v-4l-1-1l1-1V7a2 2 0 0 1 2-2m6 6.875l3-1.687m-3 1.687v3.375m0-3.375l-3-1.687m3 1.687l3 1.688M12 8.5v3.375m0 0l-3 1.688M18 19a2 2 0 0 0 2-2v-4l1-1l-1-1V7a2 2 0 0 0-2-2"
                   />
                 </svg>
-                <h1 className="text-xl font-bold">
+                <h1 className={`text-xl font-bold ${theme.text}`}>
                   Anthropic Memory MCP Visualizer
                 </h1>
               </div>
               <div className="flex items-center space-x-2">
+                {/* Theme Toggle */}
+                <button
+                  onClick={toggleTheme}
+                  className={`p-2 rounded-lg ${theme.button} transition-colors`}
+                  title={isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
+                >
+                  {isDarkMode ? (
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                    </svg>
+                  )}
+                </button>
+
+                {/* Help Button */}
+                <button
+                  onClick={() => setShowHelp(!showHelp)}
+                  className={`p-2 rounded-lg ${theme.button} transition-colors`}
+                  title="Show Keyboard Shortcuts (? or H)"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </button>
+
                 {/* Export Dropdown */}
                 <div className="relative group">
                   <button className="py-1 px-4 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition-colors flex items-center">
@@ -1295,7 +1461,7 @@ const KnowledgeGraphVisualization = () => {
               <div>
                 <label
                   htmlFor="search"
-                  className="block text-sm font-medium text-gray-700 mb-1"
+                  className={`block text-sm font-medium ${theme.textSecondary} mb-1`}
                 >
                   Search:
                 </label>
@@ -1305,7 +1471,7 @@ const KnowledgeGraphVisualization = () => {
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   placeholder="Search by name or content..."
-                  className="w-full p-2 border border-gray-300 rounded"
+                  className={`w-full p-2 border rounded ${theme.input}`}
                 />
               </div>
 
@@ -1366,12 +1532,12 @@ const KnowledgeGraphVisualization = () => {
                 ref={svgRef}
                 width="100%"
                 height="100%"
-                className="bg-white absolute top-0 left-0"
+                className={`${theme.svgBg} absolute top-0 left-0`}
                 style={{ minHeight: "500px" }}
               ></svg>
               
               {/* Zoom Controls Overlay */}
-              <div className="absolute top-4 right-4 bg-white rounded-lg shadow-lg border border-gray-200 p-2 flex flex-col gap-1">
+              <div className={`absolute top-4 right-4 ${theme.cardBg} rounded-lg shadow-lg border ${theme.border} p-2 flex flex-col gap-1`}>
                 {/* Zoom Level Indicator */}
                 <div className="text-center py-1 px-2 text-xs text-gray-500 font-medium">
                   {Math.round(zoomLevel * 100)}%
@@ -1556,6 +1722,91 @@ const KnowledgeGraphVisualization = () => {
               <span className="font-medium">Instructions:</span> Drag nodes to
               reposition. Zoom with mouse wheel. Click a node to see details.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Keyboard Shortcuts Help Overlay */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowHelp(false)}>
+          <div className={`${theme.cardBg} rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-96 overflow-y-auto`} onClick={(e) => e.stopPropagation()}>
+            <div className={`p-6 border-b ${theme.border}`}>
+              <div className="flex items-center justify-between">
+                <h2 className={`text-xl font-bold ${theme.text}`}>Keyboard Shortcuts</h2>
+                <button
+                  onClick={() => setShowHelp(false)}
+                  className={`${theme.button} p-1 rounded`}
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            
+            <div className="p-6 space-y-6">
+              <div>
+                <h3 className={`font-semibold mb-3 ${theme.text}`}>Navigation</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                  <div className={`flex justify-between ${theme.textSecondary}`}>
+                    <span>Focus search</span>
+                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>/</kbd>
+                  </div>
+                  <div className={`flex justify-between ${theme.textSecondary}`}>
+                    <span>Clear selection</span>
+                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>Esc</kbd>
+                  </div>
+                  <div className={`flex justify-between ${theme.textSecondary}`}>
+                    <span>Go back</span>
+                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>Alt + ←</kbd>
+                  </div>
+                  <div className={`flex justify-between ${theme.textSecondary}`}>
+                    <span>Go forward</span>
+                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>Alt + →</kbd>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h3 className={`font-semibold mb-3 ${theme.text}`}>Zoom & View</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                  <div className={`flex justify-between ${theme.textSecondary}`}>
+                    <span>Zoom in</span>
+                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>Ctrl/⌘ + +</kbd>
+                  </div>
+                  <div className={`flex justify-between ${theme.textSecondary}`}>
+                    <span>Zoom out</span>
+                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>Ctrl/⌘ + -</kbd>
+                  </div>
+                  <div className={`flex justify-between ${theme.textSecondary}`}>
+                    <span>Fit to screen</span>
+                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>F</kbd>
+                  </div>
+                  <div className={`flex justify-between ${theme.textSecondary}`}>
+                    <span>Reset zoom</span>
+                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>R</kbd>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h3 className={`font-semibold mb-3 ${theme.text}`}>Interface</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                  <div className={`flex justify-between ${theme.textSecondary}`}>
+                    <span>Toggle theme</span>
+                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>T</kbd>
+                  </div>
+                  <div className={`flex justify-between ${theme.textSecondary}`}>
+                    <span>Show this help</span>
+                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>? or H</kbd>
+                  </div>
+                </div>
+              </div>
+
+              <div className={`text-xs ${theme.textMuted} border-t ${theme.border} pt-4`}>
+                <p><strong>Tip:</strong> Click nodes to explore relationships, drag to reposition, and use the mouse wheel to zoom.</p>
+              </div>
+            </div>
           </div>
         </div>
       )}
