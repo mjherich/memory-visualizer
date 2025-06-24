@@ -132,6 +132,7 @@ const KnowledgeGraphVisualization = () => {
   const [errorMessage, setErrorMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [zoomLevel, setZoomLevel] = useState(1);
 
   // Function to parse the JSON file
   const parseMemoryJson = (content: string) => {
@@ -437,20 +438,23 @@ const KnowledgeGraphVisualization = () => {
       .on("zoom", (event) => {
         g.attr("transform", event.transform);
         transformRef.current = event.transform;
+        setZoomLevel(event.transform.k);
       });
     zoomBehaviorRef.current = zoomBehavior;
     svg.call(zoomBehavior as any);
 
+    // Add SVG definitions for markers and filters
+    const defs = svg.append("defs");
+    
     // Arrow markers for the links
-    svg
-      .append("defs")
+    defs
       .selectAll("marker")
       .data(["end"])
       .enter()
       .append("marker")
       .attr("id", (d) => d)
       .attr("viewBox", "0 -5 10 10")
-      .attr("refX", 25)
+      .attr("refX", 15) // Reduced from 25 since we're now calculating precise edge positions
       .attr("refY", 0)
       .attr("markerWidth", 6)
       .attr("markerHeight", 6)
@@ -458,6 +462,22 @@ const KnowledgeGraphVisualization = () => {
       .append("path")
       .attr("fill", "#999")
       .attr("d", "M0,-5L10,0L0,5");
+
+    // Glow filter for search highlights
+    const glowFilter = defs.append("filter")
+      .attr("id", "glow")
+      .attr("x", "-50%")
+      .attr("y", "-50%")
+      .attr("width", "200%")
+      .attr("height", "200%");
+    
+    glowFilter.append("feGaussianBlur")
+      .attr("stdDeviation", "3")
+      .attr("result", "coloredBlur");
+    
+    const feMerge = glowFilter.append("feMerge");
+    feMerge.append("feMergeNode").attr("in", "coloredBlur");
+    feMerge.append("feMergeNode").attr("in", "SourceGraphic");
 
     // Create the force simulation
     const simulation = d3
@@ -474,28 +494,84 @@ const KnowledgeGraphVisualization = () => {
       .force("x", d3.forceX<Node>())
       .force("y", d3.forceY<Node>());
 
-    // Create the links
+    // Create the links with search highlighting
     const link = g
       .append("g")
-      .attr("stroke", "#999")
-      .attr("stroke-opacity", 0.6)
       .selectAll("path")
       .data(links)
       .join("path")
+      .attr("stroke", (d) => {
+        // Highlight matching relations
+        const relation = graphData?.relations.find(r => 
+          r.from === d.source.name && r.to === d.target.name && r.relationType === d.type
+        );
+        if (relation && relationMatchesSearch(relation)) {
+          return "#FFD700"; // Gold for matches
+        }
+        return "#999";
+      })
+      .attr("stroke-width", (d) => {
+        // Thicker lines for search matches
+        const relation = graphData?.relations.find(r => 
+          r.from === d.source.name && r.to === d.target.name && r.relationType === d.type
+        );
+        if (relation && relationMatchesSearch(relation)) {
+          return 3;
+        }
+        return 1.5;
+      })
+      .attr("stroke-opacity", (d) => {
+        // Higher opacity for search matches
+        const relation = graphData?.relations.find(r => 
+          r.from === d.source.name && r.to === d.target.name && r.relationType === d.type
+        );
+        if (relation && relationMatchesSearch(relation)) {
+          return 0.9;
+        }
+        return 0.6;
+      })
       .attr("marker-end", "url(#end)")
       .attr("fill", "none");
 
-    // Add link labels
+    // Add link labels with search highlighting
     const linkText = g
       .append("g")
       .selectAll("text")
       .data(links)
       .join("text")
       .text((d) => d.type)
-      .attr("font-size", 10)
+      .attr("font-size", (d) => {
+        // Larger font for search matches
+        const relation = graphData?.relations.find(r => 
+          r.from === d.source.name && r.to === d.target.name && r.relationType === d.type
+        );
+        if (relation && relationMatchesSearch(relation)) {
+          return 12;
+        }
+        return 10;
+      })
       .attr("text-anchor", "middle")
       .attr("dy", -5)
-      .attr("fill", "#666");
+      .attr("fill", (d) => {
+        // Highlight text color for search matches
+        const relation = graphData?.relations.find(r => 
+          r.from === d.source.name && r.to === d.target.name && r.relationType === d.type
+        );
+        if (relation && relationMatchesSearch(relation)) {
+          return "#FFD700";
+        }
+        return "#666";
+      })
+      .attr("font-weight", (d) => {
+        // Bold text for search matches
+        const relation = graphData?.relations.find(r => 
+          r.from === d.source.name && r.to === d.target.name && r.relationType === d.type
+        );
+        if (relation && relationMatchesSearch(relation)) {
+          return "bold";
+        }
+        return "normal";
+      });
 
     // Create a group for each node
     const node = g
@@ -511,10 +587,10 @@ const KnowledgeGraphVisualization = () => {
         event.stopPropagation();
       });
 
-    // Add circles to nodes
+    // Add circles to nodes with smart sizing based on connections
     node
       .append("circle")
-      .attr("r", 10)
+      .attr("r", (d) => getNodeRadius(d.name))
       .attr("fill", (d) => {
         // Generate a color based on entity type
         const typeColors: Record<string, string> = {
@@ -531,21 +607,72 @@ const KnowledgeGraphVisualization = () => {
           Use_Case: "#ff7f50",
           Strategy: "#8a2be2",
         };
-        return typeColors[d.entityType] || "#ccc";
+        const baseColor = typeColors[d.entityType] || "#ccc";
+        
+        // Brighten color for search matches
+        if (nodeMatchesSearch(d)) {
+          // Convert hex to RGB and brighten
+          const hex = baseColor.replace('#', '');
+          const r = Math.min(255, parseInt(hex.substr(0, 2), 16) + 40);
+          const g = Math.min(255, parseInt(hex.substr(2, 2), 16) + 40);
+          const b = Math.min(255, parseInt(hex.substr(4, 2), 16) + 40);
+          return `rgb(${r}, ${g}, ${b})`;
+        }
+        
+        return baseColor;
       })
-      .attr("stroke", "#fff")
-      .attr("stroke-width", 1.5);
+      .attr("stroke", (d) => {
+        // Special highlighting for search matches
+        if (nodeMatchesSearch(d)) {
+          return "#FFD700"; // Gold border for matches
+        }
+        return "#fff";
+      })
+      .attr("stroke-width", (d) => {
+        // Thicker border for search matches
+        if (nodeMatchesSearch(d)) {
+          return 4;
+        }
+        // Slightly thicker stroke for larger nodes to maintain visual balance
+        const connectionCount = getRelationCounts(d.name);
+        const totalConnections = connectionCount.inbound + connectionCount.outbound;
+        return totalConnections > 5 ? 2 : 1.5;
+      })
+      .attr("filter", (d) => {
+        // Add glow effect for search matches
+        return nodeMatchesSearch(d) ? "url(#glow)" : null;
+      });
 
-    // Add labels to nodes
+    // Add labels to nodes with dynamic positioning
     node
       .append("text")
-      .attr("dx", 15)
+      .attr("dx", (d) => getNodeRadius(d.name) + 5) // 5px padding from node edge
       .attr("dy", ".35em")
       .text((d) => d.name)
-      .attr("font-size", 12);
+      .attr("font-size", (d) => {
+        // Slightly larger font for important nodes
+        const connectionCount = getRelationCounts(d.name);
+        const totalConnections = connectionCount.inbound + connectionCount.outbound;
+        return totalConnections > 8 ? 13 : 12;
+      })
+      .attr("font-weight", (d) => {
+        // Bold text for search matches or highly connected nodes
+        if (nodeMatchesSearch(d)) return "bold";
+        const connectionCount = getRelationCounts(d.name);
+        const totalConnections = connectionCount.inbound + connectionCount.outbound;
+        return totalConnections > 10 ? "bold" : "normal";
+      })
+      .attr("fill", (d) => {
+        // Highlight text color for search matches
+        return nodeMatchesSearch(d) ? "#FFD700" : "#333";
+      });
 
-    // Add titles for hover
-    node.append("title").text((d) => `${d.name} (${d.entityType})`);
+    // Add titles for hover with connection info
+    node.append("title").text((d) => {
+      const connectionCount = getRelationCounts(d.name);
+      const totalConnections = connectionCount.inbound + connectionCount.outbound;
+      return `${d.name} (${d.entityType})\nConnections: ${totalConnections} (${connectionCount.inbound} in, ${connectionCount.outbound} out)`;
+    });
 
     // Update positions on simulation tick
     simulation.on("tick", () => {
@@ -558,10 +685,25 @@ const KnowledgeGraphVisualization = () => {
         )
           return "";
 
+        // Calculate positions accounting for node radius
+        const sourceRadius = getNodeRadius(d.source.name);
+        const targetRadius = getNodeRadius(d.target.name);
+        
         const dx = d.target.x - d.source.x;
         const dy = d.target.y - d.source.y;
-        const dr = Math.sqrt(dx * dx + dy * dy);
-        return `M${d.source.x},${d.source.y}A${dr},${dr} 0 0,1 ${d.target.x},${d.target.y}`;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        // Avoid division by zero
+        if (distance === 0) return "";
+        
+        // Calculate edge points on the circumference of the circles
+        const sourceX = d.source.x + (sourceRadius * dx) / distance;
+        const sourceY = d.source.y + (sourceRadius * dy) / distance;
+        const targetX = d.target.x - (targetRadius * dx) / distance;
+        const targetY = d.target.y - (targetRadius * dy) / distance;
+        
+        const dr = Math.sqrt((targetX - sourceX) ** 2 + (targetY - sourceY) ** 2);
+        return `M${sourceX},${sourceY}A${dr},${dr} 0 0,1 ${targetX},${targetY}`;
       });
 
       linkText.attr("transform", (d) => {
@@ -655,6 +797,171 @@ const KnowledgeGraphVisualization = () => {
     ).length;
 
     return { inbound, outbound };
+  };
+
+  // Helper function to calculate node radius based on connections
+  const getNodeRadius = (nodeName: string) => {
+    const connectionCount = getRelationCounts(nodeName);
+    const totalConnections = connectionCount.inbound + connectionCount.outbound;
+    
+    const minRadius = 8;
+    const maxRadius = 25;
+    const scaledRadius = totalConnections > 0 
+      ? minRadius + (maxRadius - minRadius) * Math.log(totalConnections + 1) / Math.log(20)
+      : minRadius;
+    
+    return Math.min(maxRadius, Math.max(minRadius, scaledRadius));
+  };
+
+  // Helper function to check if a node matches the search term
+  const nodeMatchesSearch = (node: Node) => {
+    if (!searchTerm) return false;
+    const term = searchTerm.toLowerCase();
+    return (
+      node.name.toLowerCase().includes(term) ||
+      node.entityType.toLowerCase().includes(term) ||
+      node.observations.some((obs) => obs.toLowerCase().includes(term))
+    );
+  };
+
+  // Helper function to check if a relation matches the search term
+  const relationMatchesSearch = (relation: Relation) => {
+    if (!searchTerm) return false;
+    const term = searchTerm.toLowerCase();
+    return (
+      relation.from.toLowerCase().includes(term) ||
+      relation.to.toLowerCase().includes(term) ||
+      relation.relationType.toLowerCase().includes(term)
+    );
+  };
+
+  // Zoom control functions
+  const handleZoomIn = () => {
+    if (!svgRef.current || !zoomBehaviorRef.current) return;
+    const svg = d3.select(svgRef.current);
+    svg.transition().duration(300).call(
+      zoomBehaviorRef.current.scaleBy as any, 1.5
+    );
+  };
+
+  const handleZoomOut = () => {
+    if (!svgRef.current || !zoomBehaviorRef.current) return;
+    const svg = d3.select(svgRef.current);
+    svg.transition().duration(300).call(
+      zoomBehaviorRef.current.scaleBy as any, 0.67
+    );
+  };
+
+  const handleFitToScreen = () => {
+    if (!svgRef.current || !zoomBehaviorRef.current || !nodesRef.current.length) return;
+    
+    const svg = d3.select(svgRef.current);
+    const nodes = nodesRef.current;
+    
+    // Calculate bounds of all nodes
+    const xExtent = d3.extent(nodes, d => d.x || 0) as [number, number];
+    const yExtent = d3.extent(nodes, d => d.y || 0) as [number, number];
+    
+    const padding = 50;
+    const nodeWidth = xExtent[1] - xExtent[0] + padding * 2;
+    const nodeHeight = yExtent[1] - yExtent[0] + padding * 2;
+    
+    const scale = Math.min(
+      dimensions.width / nodeWidth,
+      dimensions.height / nodeHeight,
+      2 // Maximum scale
+    );
+    
+    const centerX = (xExtent[0] + xExtent[1]) / 2;
+    const centerY = (yExtent[0] + yExtent[1]) / 2;
+    
+    const x = dimensions.width / 2 - centerX * scale;
+    const y = dimensions.height / 2 - centerY * scale;
+    
+    svg.transition().duration(750).call(
+      zoomBehaviorRef.current.transform as any,
+      d3.zoomIdentity.translate(x, y).scale(scale)
+    );
+  };
+
+  const handleResetZoom = () => {
+    if (!svgRef.current || !zoomBehaviorRef.current) return;
+    const svg = d3.select(svgRef.current);
+    svg.transition().duration(750).call(
+      zoomBehaviorRef.current.transform as any,
+      d3.zoomIdentity
+    );
+  };
+
+  // Export functions
+  const exportAsSVG = () => {
+    if (!svgRef.current) return;
+    
+    // Clone the SVG element
+    const svgElement = svgRef.current.cloneNode(true) as SVGSVGElement;
+    
+    // Create a clean SVG with proper styling
+    const serializer = new XMLSerializer();
+    const svgString = serializer.serializeToString(svgElement);
+    
+    // Create blob and download
+    const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `knowledge-graph-${new Date().toISOString().slice(0, 10)}.svg`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const exportAsPNG = (scale = 2) => {
+    if (!svgRef.current) return;
+    
+    // Create a canvas element
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    
+    // Set canvas size with scaling for high resolution
+    const svgRect = svgRef.current.getBoundingClientRect();
+    canvas.width = svgRect.width * scale;
+    canvas.height = svgRect.height * scale;
+    
+    // Create an image from the SVG
+    const svgData = new XMLSerializer().serializeToString(svgRef.current);
+    const svgBlob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(svgBlob);
+    
+    const img = new Image();
+    img.onload = () => {
+      // Set white background
+      context.fillStyle = "white";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw the image scaled
+      context.drawImage(img, 0, 0, canvas.width, canvas.height);
+      
+      // Convert to PNG and download
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const pngUrl = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = pngUrl;
+          link.download = `knowledge-graph-${new Date().toISOString().slice(0, 10)}.png`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(pngUrl);
+        }
+      }, "image/png");
+      
+      URL.revokeObjectURL(url);
+    };
+    
+    img.src = url;
   };
 
   // Reset the visualization
@@ -906,19 +1213,67 @@ const KnowledgeGraphVisualization = () => {
                   Anthropic Memory MCP Visualizer
                 </h1>
               </div>
-              <button
-                onClick={resetVisualization}
-                className="py-1 px-4 bg-purple-100 hover:bg-purple-200 text-purple-700 rounded transition-colors flex items-center"
-              >
-                <svg 
-                  className="w-4 h-4 mr-1" 
-                  xmlns="http://www.w3.org/2000/svg" 
-                  viewBox="0 0 24 24"
+              <div className="flex items-center space-x-2">
+                {/* Export Dropdown */}
+                <div className="relative group">
+                  <button className="py-1 px-4 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition-colors flex items-center">
+                    <svg 
+                      className="w-4 h-4 mr-1" 
+                      fill="none" 
+                      viewBox="0 0 24 24" 
+                      stroke="currentColor"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    Export
+                  </button>
+                  
+                  {/* Dropdown Menu */}
+                  <div className="absolute right-0 mt-1 w-48 bg-white rounded-md shadow-lg border border-gray-200 z-10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200">
+                    <div className="py-1">
+                      <button
+                        onClick={exportAsPNG}
+                        className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors"
+                      >
+                        <div className="flex items-center">
+                          <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                          </svg>
+                          Export as PNG (2x)
+                        </div>
+                        <div className="text-xs text-gray-500 ml-6">High resolution image</div>
+                      </button>
+                      
+                      <button
+                        onClick={exportAsSVG}
+                        className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors"
+                      >
+                        <div className="flex items-center">
+                          <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                          Export as SVG
+                        </div>
+                        <div className="text-xs text-gray-500 ml-6">Vector format, scalable</div>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                
+                <button
+                  onClick={resetVisualization}
+                  className="py-1 px-4 bg-purple-100 hover:bg-purple-200 text-purple-700 rounded transition-colors flex items-center"
                 >
-                  <path fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 19a2 2 0 0 1-2-2v-4l-1-1l1-1V7a2 2 0 0 1 2-2m6 6.875l3-1.687m-3 1.687v3.375m0-3.375l-3-1.687m3 1.687l3 1.688M12 8.5v3.375m0 0l-3 1.688M18 19a2 2 0 0 0 2-2v-4l1-1l-1-1V7a2 2 0 0 0-2-2"/>
-                </svg>
-                Upload New File
-              </button>
+                  <svg 
+                    className="w-4 h-4 mr-1" 
+                    xmlns="http://www.w3.org/2000/svg" 
+                    viewBox="0 0 24 24"
+                  >
+                    <path fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 19a2 2 0 0 1-2-2v-4l-1-1l1-1V7a2 2 0 0 1 2-2m6 6.875l3-1.687m-3 1.687v3.375m0-3.375l-3-1.687m3 1.687l3 1.688M12 8.5v3.375m0 0l-3 1.688M18 19a2 2 0 0 0 2-2v-4l1-1l-1-1V7a2 2 0 0 0-2-2"/>
+                  </svg>
+                  Upload New File
+                </button>
+              </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -1014,6 +1369,58 @@ const KnowledgeGraphVisualization = () => {
                 className="bg-white absolute top-0 left-0"
                 style={{ minHeight: "500px" }}
               ></svg>
+              
+              {/* Zoom Controls Overlay */}
+              <div className="absolute top-4 right-4 bg-white rounded-lg shadow-lg border border-gray-200 p-2 flex flex-col gap-1">
+                {/* Zoom Level Indicator */}
+                <div className="text-center py-1 px-2 text-xs text-gray-500 font-medium">
+                  {Math.round(zoomLevel * 100)}%
+                </div>
+                
+                <div className="border-t border-gray-200 my-1"></div>
+                
+                <button
+                  onClick={handleZoomIn}
+                  className="p-2 hover:bg-gray-100 rounded-md transition-colors group"
+                  title="Zoom In (Ctrl/Cmd + Plus)"
+                >
+                  <svg className="w-5 h-5 text-gray-600 group-hover:text-gray-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7" />
+                  </svg>
+                </button>
+                
+                <button
+                  onClick={handleZoomOut}
+                  className="p-2 hover:bg-gray-100 rounded-md transition-colors group"
+                  title="Zoom Out (Ctrl/Cmd + Minus)"
+                >
+                  <svg className="w-5 h-5 text-gray-600 group-hover:text-gray-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM13 10H7" />
+                  </svg>
+                </button>
+                
+                <div className="border-t border-gray-200 my-1"></div>
+                
+                <button
+                  onClick={handleFitToScreen}
+                  className="p-2 hover:bg-gray-100 rounded-md transition-colors group"
+                  title="Fit to Screen (F)"
+                >
+                  <svg className="w-5 h-5 text-gray-600 group-hover:text-gray-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                  </svg>
+                </button>
+                
+                <button
+                  onClick={handleResetZoom}
+                  className="p-2 hover:bg-gray-100 rounded-md transition-colors group"
+                  title="Reset Zoom (R)"
+                >
+                  <svg className="w-5 h-5 text-gray-600 group-hover:text-gray-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+              </div>
             </div>
 
             {selectedNode && (
