@@ -140,6 +140,10 @@ const KnowledgeGraphVisualization = () => {
     return window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
   const [showHelp, setShowHelp] = useState(false);
+  const [isHelpAnimating, setIsHelpAnimating] = useState(false);
+  const [showEdgeLabels, setShowEdgeLabels] = useState(false);
+  const [highlightedRelationTypes, setHighlightedRelationTypes] = useState<Set<string>>(new Set());
+  const [isRelationHighlightMode, setIsRelationHighlightMode] = useState(false);
 
   // Function to parse the JSON file
   const parseMemoryJson = (content: string) => {
@@ -486,7 +490,7 @@ const KnowledgeGraphVisualization = () => {
     feMerge.append("feMergeNode").attr("in", "coloredBlur");
     feMerge.append("feMergeNode").attr("in", "SourceGraphic");
 
-    // Create the force simulation
+    // Create the force simulation with improved spacing
     const simulation = d3
       .forceSimulation<Node>(nodes)
       .force(
@@ -494,12 +498,26 @@ const KnowledgeGraphVisualization = () => {
         d3
           .forceLink<Node, Link>(links)
           .id((d) => d.id)
-          .distance(150)
+          .distance((d) => {
+            // Dynamic link distance based on node importance
+            const sourceRadius = getNodeRadius(d.source.name);
+            const targetRadius = getNodeRadius(d.target.name);
+            return Math.max(120, (sourceRadius + targetRadius) * 3 + 80);
+          })
+          .strength(0.3)
       )
-      .force("charge", d3.forceManyBody<Node>().strength(-500))
+      .force("charge", d3.forceManyBody<Node>().strength((d) => {
+        // Stronger repulsion for larger nodes to reduce overlap
+        const radius = getNodeRadius(d.name);
+        return -Math.max(400, radius * 25);
+      }))
       .force("center", d3.forceCenter<Node>(width / 2, height / 2))
-      .force("x", d3.forceX<Node>())
-      .force("y", d3.forceY<Node>());
+      .force("collision", d3.forceCollide<Node>().radius((d) => {
+        // Collision detection to prevent node overlap
+        return getNodeRadius(d.name) + 25; // Extra padding for labels
+      }).strength(0.5))
+      .force("x", d3.forceX<Node>().strength(0.05))
+      .force("y", d3.forceY<Node>().strength(0.05));
 
     // Create the links with search highlighting
     const link = g
@@ -513,9 +531,16 @@ const KnowledgeGraphVisualization = () => {
           r.from === d.source.name && r.to === d.target.name && r.relationType === d.type
         );
         if (relation && relationMatchesSearch(relation)) {
-          return "#FFD700"; // Gold for matches
+          return "#FFD700"; // Gold for search matches
         }
-        return "#999";
+        // Apply relation type highlighting
+        if (isRelationHighlightMode) {
+          if (highlightedRelationTypes.has(d.type)) {
+            return "#0066CC"; // Blue for highlighted relation types
+          }
+          return "#ddd"; // Light gray for non-highlighted
+        }
+        return "#999"; // Default gray
       })
       .attr("stroke-width", (d) => {
         // Thicker lines for search matches
@@ -524,6 +549,10 @@ const KnowledgeGraphVisualization = () => {
         );
         if (relation && relationMatchesSearch(relation)) {
           return 3;
+        }
+        // Apply relation type highlighting
+        if (isRelationHighlightMode && highlightedRelationTypes.has(d.type)) {
+          return 2.5; // Thicker for highlighted relation types
         }
         return 1.5;
       })
@@ -535,12 +564,19 @@ const KnowledgeGraphVisualization = () => {
         if (relation && relationMatchesSearch(relation)) {
           return 0.9;
         }
+        // Apply relation type highlighting
+        if (isRelationHighlightMode) {
+          if (highlightedRelationTypes.has(d.type)) {
+            return 0.9; // High opacity for highlighted relation types
+          }
+          return 0.2; // Low opacity for non-highlighted
+        }
         return 0.6;
       })
       .attr("marker-end", "url(#end)")
       .attr("fill", "none");
 
-    // Add link labels with search highlighting
+    // Add link labels with search highlighting - conditionally visible
     const linkText = g
       .append("g")
       .selectAll("text")
@@ -578,7 +614,24 @@ const KnowledgeGraphVisualization = () => {
           return "bold";
         }
         return "normal";
-      });
+      })
+      .attr("opacity", (d) => {
+        // Show labels based on toggle state, but always show search matches and highlights
+        const relation = graphData?.relations.find(r => 
+          r.from === d.source.name && r.to === d.target.name && r.relationType === d.type
+        );
+        if (searchTerm && relation && relationMatchesSearch(relation)) {
+          return 1; // Always show search matches
+        }
+        if (isRelationHighlightMode && highlightedRelationTypes.has(d.type)) {
+          return 1; // Always show highlighted relation types
+        }
+        if (isRelationHighlightMode && !highlightedRelationTypes.has(d.type)) {
+          return 0; // Hide non-highlighted when in highlight mode
+        }
+        return showEdgeLabels ? 0.8 : 0;
+      })
+      .style("pointer-events", showEdgeLabels ? "none" : "none"); // Prevent interference with interactions
 
     // Create a group for each node
     const node = g
@@ -650,30 +703,41 @@ const KnowledgeGraphVisualization = () => {
         return nodeMatchesSearch(d) ? "url(#glow)" : null;
       });
 
-    // Add labels to nodes with dynamic positioning
+    // Add labels to nodes with dynamic positioning and improved readability
     node
       .append("text")
-      .attr("dx", (d) => getNodeRadius(d.name) + 5) // 5px padding from node edge
+      .attr("dx", (d) => getNodeRadius(d.name) + 6) // Slightly more padding from node edge
       .attr("dy", ".35em")
-      .text((d) => d.name)
+      .text((d) => {
+        // Truncate long names for better readability
+        const maxLength = Math.max(15, Math.floor(30 / Math.max(1, Math.log(nodesRef.current.length + 1))));
+        return d.name.length > maxLength ? d.name.substring(0, maxLength) + "..." : d.name;
+      })
       .attr("font-size", (d) => {
-        // Slightly larger font for important nodes
+        // Scale font size based on node importance and zoom level
         const connectionCount = getRelationCounts(d.name);
         const totalConnections = connectionCount.inbound + connectionCount.outbound;
-        return totalConnections > 8 ? 13 : 12;
+        const baseSize = totalConnections > 8 ? 12 : 11;
+        // Scale font with zoom for better readability
+        const zoomScale = Math.min(1.2, Math.max(0.8, transformRef.current.k));
+        return Math.round(baseSize * zoomScale);
       })
       .attr("font-weight", (d) => {
         // Bold text for search matches or highly connected nodes
         if (nodeMatchesSearch(d)) return "bold";
         const connectionCount = getRelationCounts(d.name);
         const totalConnections = connectionCount.inbound + connectionCount.outbound;
-        return totalConnections > 10 ? "bold" : "normal";
+        return totalConnections > 10 ? "600" : "500";
       })
       .attr("fill", (d) => {
         // Highlight text color for search matches
         if (nodeMatchesSearch(d)) return "#FFD700";
         return isDarkMode ? "#e5e7eb" : "#333";
-      });
+      })
+      .attr("stroke", isDarkMode ? "#1f2937" : "#ffffff")
+      .attr("stroke-width", "0.5")
+      .attr("paint-order", "stroke fill") // Ensure stroke renders behind fill
+      .style("text-shadow", isDarkMode ? "1px 1px 2px rgba(0,0,0,0.8)" : "1px 1px 2px rgba(255,255,255,0.8)");
 
     // Add titles for hover with connection info
     node.append("title").text((d) => {
@@ -771,7 +835,7 @@ const KnowledgeGraphVisualization = () => {
     return () => {
       simulation.stop();
     };
-  }, [graphData, searchTerm, filterEntityType, filterRelationType, dimensions]);
+  }, [graphData, searchTerm, filterEntityType, filterRelationType, dimensions, showEdgeLabels, isDarkMode, highlightedRelationTypes, isRelationHighlightMode]);
   
   // Recenter graph when a node is selected
   useEffect(() => {
@@ -979,6 +1043,20 @@ const KnowledgeGraphVisualization = () => {
     localStorage.setItem('theme', newTheme ? 'dark' : 'light');
   };
 
+  // Help modal animation handlers
+  const handleOpenHelp = () => {
+    setShowHelp(true);
+    setIsHelpAnimating(true);
+  };
+
+  const handleCloseHelp = () => {
+    setIsHelpAnimating(false);
+    // Wait for animation to complete before hiding
+    setTimeout(() => {
+      setShowHelp(false);
+    }, 300);
+  };
+
   // Keyboard shortcuts handler
   const handleKeyDown = useCallback((event: KeyboardEvent) => {
     // Don't trigger shortcuts when typing in inputs
@@ -995,13 +1073,20 @@ const KnowledgeGraphVisualization = () => {
       case '?':
       case 'h':
         if (!isCtrlOrCmd) {
-          setShowHelp(!showHelp);
+          if (showHelp) {
+            handleCloseHelp();
+          } else {
+            handleOpenHelp();
+          }
           event.preventDefault();
         }
         break;
       case 'escape':
-        setShowHelp(false);
-        dispatchHistory({ type: 'clear' });
+        if (showHelp) {
+          handleCloseHelp();
+        } else {
+          dispatchHistory({ type: 'clear' });
+        }
         event.preventDefault();
         break;
       case 'f':
@@ -1056,8 +1141,23 @@ const KnowledgeGraphVisualization = () => {
           }
         }
         break;
+      case 'l':
+        if (!isCtrlOrCmd) {
+          setShowEdgeLabels(!showEdgeLabels);
+          event.preventDefault();
+        }
+        break;
+      case 'g':
+        if (!isCtrlOrCmd) {
+          setIsRelationHighlightMode(!isRelationHighlightMode);
+          if (isRelationHighlightMode) {
+            setHighlightedRelationTypes(new Set());
+          }
+          event.preventDefault();
+        }
+        break;
     }
-  }, [showHelp, handleFitToScreen, handleResetZoom, handleZoomIn, handleZoomOut, toggleTheme, dispatchHistory]);
+  }, [showHelp, handleFitToScreen, handleResetZoom, handleZoomIn, handleZoomOut, toggleTheme, dispatchHistory, showEdgeLabels, isRelationHighlightMode]);
 
   // Add keyboard event listeners
   useEffect(() => {
@@ -1091,6 +1191,9 @@ const KnowledgeGraphVisualization = () => {
     setSearchTerm("");
     setFilterEntityType("All");
     setFilterRelationType("All");
+    setShowEdgeLabels(false);
+    setIsRelationHighlightMode(false);
+    setHighlightedRelationTypes(new Set());
     setErrorMessage("");
   };
 
@@ -1371,7 +1474,7 @@ const KnowledgeGraphVisualization = () => {
 
                 {/* Help Button */}
                 <button
-                  onClick={() => setShowHelp(!showHelp)}
+                  onClick={showHelp ? handleCloseHelp : handleOpenHelp}
                   className={`p-2 rounded-lg ${theme.button} transition-colors`}
                   title="Show Keyboard Shortcuts (? or H)"
                 >
@@ -1457,7 +1560,7 @@ const KnowledgeGraphVisualization = () => {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
               <div>
                 <label
                   htmlFor="search"
@@ -1478,7 +1581,7 @@ const KnowledgeGraphVisualization = () => {
               <div>
                 <label
                   htmlFor="entityType"
-                  className="block text-sm font-medium text-gray-700 mb-1"
+                  className={`block text-sm font-medium ${theme.textSecondary} mb-1`}
                 >
                   Filter by Entity Type:
                 </label>
@@ -1486,7 +1589,7 @@ const KnowledgeGraphVisualization = () => {
                   id="entityType"
                   value={filterEntityType}
                   onChange={(e) => setFilterEntityType(e.target.value)}
-                  className="w-full p-2 border border-gray-300 rounded"
+                  className={`w-full p-2 border rounded ${theme.input}`}
                 >
                   {entityTypes.map((type) => (
                     <option key={type} value={type}>
@@ -1499,7 +1602,7 @@ const KnowledgeGraphVisualization = () => {
               <div>
                 <label
                   htmlFor="relationType"
-                  className="block text-sm font-medium text-gray-700 mb-1"
+                  className={`block text-sm font-medium ${theme.textSecondary} mb-1`}
                 >
                   Filter by Relation Type:
                 </label>
@@ -1507,7 +1610,7 @@ const KnowledgeGraphVisualization = () => {
                   id="relationType"
                   value={filterRelationType}
                   onChange={(e) => setFilterRelationType(e.target.value)}
-                  className="w-full p-2 border border-gray-300 rounded"
+                  className={`w-full p-2 border rounded ${theme.input}`}
                 >
                   {relationTypes.map((type) => (
                     <option key={type} value={type}>
@@ -1516,6 +1619,94 @@ const KnowledgeGraphVisualization = () => {
                   ))}
                 </select>
               </div>
+            </div>
+
+            {/* View Controls */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-6">
+                <div className="flex items-center">
+                  <input
+                    id="showEdgeLabels"
+                    type="checkbox"
+                    checked={showEdgeLabels}
+                    onChange={(e) => setShowEdgeLabels(e.target.checked)}
+                    className="mr-2 rounded"
+                  />
+                  <label htmlFor="showEdgeLabels" className={`text-sm font-medium ${theme.textSecondary}`}>
+                    Show connection labels
+                  </label>
+                </div>
+                
+                <div className="flex items-center">
+                  <input
+                    id="highlightMode"
+                    type="checkbox"
+                    checked={isRelationHighlightMode}
+                    onChange={(e) => {
+                      setIsRelationHighlightMode(e.target.checked);
+                      if (!e.target.checked) {
+                        setHighlightedRelationTypes(new Set());
+                      }
+                    }}
+                    className="mr-2 rounded"
+                  />
+                  <label htmlFor="highlightMode" className={`text-sm font-medium ${theme.textSecondary}`}>
+                    Highlight specific relation types
+                  </label>
+                </div>
+                
+                <div className={`text-xs ${theme.textMuted}`}>
+                  💡 Tip: Labels are automatically shown for search matches & highlights
+                </div>
+              </div>
+
+              {/* Relation Type Selection */}
+              {isRelationHighlightMode && (
+                <div className={`${theme.panelBg} p-3 rounded-lg border ${theme.border}`}>
+                  <div className="text-sm font-medium mb-2 text-purple-700">Select relation types to highlight:</div>
+                  <div className="flex flex-wrap gap-2">
+                    {relationTypes.filter(type => type !== "All").map((type) => (
+                      <label key={type} className="flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={highlightedRelationTypes.has(type)}
+                          onChange={(e) => {
+                            const newSet = new Set(highlightedRelationTypes);
+                            if (e.target.checked) {
+                              newSet.add(type);
+                            } else {
+                              newSet.delete(type);
+                            }
+                            setHighlightedRelationTypes(newSet);
+                          }}
+                          className="mr-1 rounded"
+                        />
+                        <span className={`text-xs px-2 py-1 rounded-full ${
+                          highlightedRelationTypes.has(type) 
+                            ? 'bg-blue-100 text-blue-800' 
+                            : 'bg-gray-100 text-gray-600'
+                        }`}>
+                          {type}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={() => setHighlightedRelationTypes(new Set(relationTypes.filter(t => t !== "All")))}
+                      className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      onClick={() => setHighlightedRelationTypes(new Set())}
+                      className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1726,85 +1917,420 @@ const KnowledgeGraphVisualization = () => {
         </div>
       )}
 
-      {/* Keyboard Shortcuts Help Overlay */}
+      {/* Keyboard Shortcuts Help Overlay - Liquid Glass Style with Animations */}
       {showHelp && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowHelp(false)}>
-          <div className={`${theme.cardBg} rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-96 overflow-y-auto`} onClick={(e) => e.stopPropagation()}>
-            <div className={`p-6 border-b ${theme.border}`}>
+        <div 
+          className="fixed inset-0 flex items-center justify-center z-50 p-4"
+          style={{
+            background: 'radial-gradient(circle at center, rgba(0,0,0,0.6) 0%, rgba(0,0,0,0.8) 100%)',
+            backdropFilter: 'blur(20px)',
+            WebkitBackdropFilter: 'blur(20px)',
+            animation: isHelpAnimating 
+              ? 'fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards'
+              : 'fadeOut 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards'
+          }}
+          onClick={handleCloseHelp}
+        >
+          <style jsx>{`
+            @keyframes fadeIn {
+              from {
+                opacity: 0;
+                backdrop-filter: blur(0px);
+                -webkit-backdrop-filter: blur(0px);
+              }
+              to {
+                opacity: 1;
+                backdrop-filter: blur(20px);
+                -webkit-backdrop-filter: blur(20px);
+              }
+            }
+            
+            @keyframes fadeOut {
+              from {
+                opacity: 1;
+                backdrop-filter: blur(20px);
+                -webkit-backdrop-filter: blur(20px);
+              }
+              to {
+                opacity: 0;
+                backdrop-filter: blur(0px);
+                -webkit-backdrop-filter: blur(0px);
+              }
+            }
+            
+            @keyframes modalIn {
+              from {
+                opacity: 0;
+                transform: scale(0.85) translateY(20px);
+                backdrop-filter: blur(0px) saturate(100%);
+                -webkit-backdrop-filter: blur(0px) saturate(100%);
+              }
+              50% {
+                opacity: 0.8;
+                transform: scale(0.95) translateY(10px);
+              }
+              to {
+                opacity: 1;
+                transform: scale(1) translateY(0px);
+                backdrop-filter: blur(40px) saturate(180%);
+                -webkit-backdrop-filter: blur(40px) saturate(180%);
+              }
+            }
+            
+            @keyframes modalOut {
+              from {
+                opacity: 1;
+                transform: scale(1) translateY(0px);
+                backdrop-filter: blur(40px) saturate(180%);
+                -webkit-backdrop-filter: blur(40px) saturate(180%);
+              }
+              50% {
+                opacity: 0.5;
+                transform: scale(0.95) translateY(-10px);
+              }
+              to {
+                opacity: 0;
+                transform: scale(0.8) translateY(-30px);
+                backdrop-filter: blur(0px) saturate(100%);
+                -webkit-backdrop-filter: blur(0px) saturate(100%);
+              }
+            }
+            
+            @keyframes contentSlideIn {
+              from {
+                opacity: 0;
+                transform: translateY(20px);
+              }
+              to {
+                opacity: 1;
+                transform: translateY(0px);
+              }
+            }
+            
+            @keyframes contentSlideOut {
+              from {
+                opacity: 1;
+                transform: translateY(0px);
+              }
+              to {
+                opacity: 0;
+                transform: translateY(10px);
+              }
+            }
+          `}</style>
+          
+          <div 
+            className="relative max-w-4xl w-full max-h-[90vh] overflow-hidden"
+            style={{
+              background: isDarkMode 
+                ? 'linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.02) 100%)'
+                : 'linear-gradient(135deg, rgba(255,255,255,0.25) 0%, rgba(255,255,255,0.1) 100%)',
+              backdropFilter: 'blur(40px) saturate(180%)',
+              WebkitBackdropFilter: 'blur(40px) saturate(180%)',
+              border: isDarkMode 
+                ? '1px solid rgba(255,255,255,0.1)' 
+                : '1px solid rgba(255,255,255,0.2)',
+              borderRadius: '24px',
+              boxShadow: isDarkMode
+                ? '0 25px 60px rgba(0,0,0,0.4), 0 15px 30px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.1)'
+                : '0 25px 60px rgba(0,0,0,0.15), 0 15px 30px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.4)',
+              animation: isHelpAnimating 
+                ? 'modalIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards'
+                : 'modalOut 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Liquid Glass Highlight Effects */}
+            <div 
+              className="absolute inset-0 rounded-3xl opacity-60"
+              style={{
+                background: isDarkMode
+                  ? 'radial-gradient(circle at 30% 20%, rgba(147,51,234,0.15) 0%, transparent 50%), radial-gradient(circle at 70% 80%, rgba(59,130,246,0.1) 0%, transparent 50%)'
+                  : 'radial-gradient(circle at 30% 20%, rgba(147,51,234,0.08) 0%, transparent 50%), radial-gradient(circle at 70% 80%, rgba(59,130,246,0.06) 0%, transparent 50%)'
+              }}
+            />
+            
+            {/* Header */}
+            <div 
+              className="relative p-8 pb-6"
+              style={{
+                borderBottom: isDarkMode 
+                  ? '1px solid rgba(255,255,255,0.08)' 
+                  : '1px solid rgba(0,0,0,0.06)'
+              }}
+            >
               <div className="flex items-center justify-between">
-                <h2 className={`text-xl font-bold ${theme.text}`}>Keyboard Shortcuts</h2>
-                <button
-                  onClick={() => setShowHelp(false)}
-                  className={`${theme.button} p-1 rounded`}
+                <h2 
+                  className="text-2xl font-semibold"
+                  style={{
+                    color: isDarkMode ? 'rgba(255,255,255,0.95)' : 'rgba(0,0,0,0.85)',
+                    textShadow: isDarkMode ? '0 1px 2px rgba(0,0,0,0.3)' : '0 1px 2px rgba(255,255,255,0.8)'
+                  }}
                 >
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  Keyboard Shortcuts
+                </h2>
+                <button
+                  onClick={handleCloseHelp}
+                  className="relative p-2 rounded-full transition-all duration-200 hover:scale-105"
+                  style={{
+                    background: isDarkMode 
+                      ? 'rgba(255,255,255,0.08)' 
+                      : 'rgba(0,0,0,0.04)',
+                    backdropFilter: 'blur(10px)',
+                    border: isDarkMode 
+                      ? '1px solid rgba(255,255,255,0.1)' 
+                      : '1px solid rgba(0,0,0,0.06)'
+                  }}
+                >
+                  <svg 
+                    className="w-5 h-5" 
+                    fill="none" 
+                    viewBox="0 0 24 24" 
+                    stroke="currentColor"
+                    style={{
+                      color: isDarkMode ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.7)'
+                    }}
+                  >
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
               </div>
             </div>
             
-            <div className="p-6 space-y-6">
-              <div>
-                <h3 className={`font-semibold mb-3 ${theme.text}`}>Navigation</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                  <div className={`flex justify-between ${theme.textSecondary}`}>
-                    <span>Focus search</span>
-                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>/</kbd>
-                  </div>
-                  <div className={`flex justify-between ${theme.textSecondary}`}>
-                    <span>Clear selection</span>
-                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>Esc</kbd>
-                  </div>
-                  <div className={`flex justify-between ${theme.textSecondary}`}>
-                    <span>Go back</span>
-                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>Alt + ←</kbd>
-                  </div>
-                  <div className={`flex justify-between ${theme.textSecondary}`}>
-                    <span>Go forward</span>
-                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>Alt + →</kbd>
-                  </div>
+            {/* Content */}
+            <div 
+              className="relative p-8 space-y-8 overflow-y-auto max-h-[calc(90vh-120px)]"
+              style={{
+                animation: isHelpAnimating 
+                  ? 'contentSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both'
+                  : 'contentSlideOut 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards'
+              }}
+            >
+              {/* Navigation Section */}
+              <div className="space-y-4">
+                <h3 
+                  className="text-lg font-medium"
+                  style={{
+                    color: isDarkMode ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.8)'
+                  }}
+                >
+                  Navigation
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {[
+                    { label: 'Focus search', key: '/' },
+                    { label: 'Clear selection', key: 'Esc' },
+                    { label: 'Go back', key: 'Alt + ←' },
+                    { label: 'Go forward', key: 'Alt + →' }
+                  ].map((shortcut, index) => (
+                    <div key={index} className="flex items-center justify-between p-3 rounded-xl"
+                      style={{
+                        background: isDarkMode 
+                          ? 'rgba(255,255,255,0.03)' 
+                          : 'rgba(255,255,255,0.3)',
+                        backdropFilter: 'blur(20px)',
+                        border: isDarkMode 
+                          ? '1px solid rgba(255,255,255,0.05)' 
+                          : '1px solid rgba(255,255,255,0.2)'
+                      }}
+                    >
+                      <span style={{ color: isDarkMode ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.7)' }}>
+                        {shortcut.label}
+                      </span>
+                      <kbd 
+                        className="px-3 py-1.5 rounded-lg text-sm font-mono"
+                        style={{
+                          background: isDarkMode 
+                            ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
+                            : 'linear-gradient(135deg, rgba(255,255,255,0.4) 0%, rgba(255,255,255,0.2) 100%)',
+                          backdropFilter: 'blur(10px)',
+                          border: isDarkMode 
+                            ? '1px solid rgba(255,255,255,0.1)' 
+                            : '1px solid rgba(255,255,255,0.3)',
+                          color: isDarkMode ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.8)',
+                          boxShadow: isDarkMode
+                            ? 'inset 0 1px 0 rgba(255,255,255,0.1), 0 1px 3px rgba(0,0,0,0.2)'
+                            : 'inset 0 1px 0 rgba(255,255,255,0.5), 0 1px 3px rgba(0,0,0,0.1)'
+                        }}
+                      >
+                        {shortcut.key}
+                      </kbd>
+                    </div>
+                  ))}
                 </div>
               </div>
 
-              <div>
-                <h3 className={`font-semibold mb-3 ${theme.text}`}>Zoom & View</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                  <div className={`flex justify-between ${theme.textSecondary}`}>
-                    <span>Zoom in</span>
-                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>Ctrl/⌘ + +</kbd>
-                  </div>
-                  <div className={`flex justify-between ${theme.textSecondary}`}>
-                    <span>Zoom out</span>
-                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>Ctrl/⌘ + -</kbd>
-                  </div>
-                  <div className={`flex justify-between ${theme.textSecondary}`}>
-                    <span>Fit to screen</span>
-                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>F</kbd>
-                  </div>
-                  <div className={`flex justify-between ${theme.textSecondary}`}>
-                    <span>Reset zoom</span>
-                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>R</kbd>
-                  </div>
+              {/* Zoom & View Section */}
+              <div className="space-y-4">
+                <h3 
+                  className="text-lg font-medium"
+                  style={{
+                    color: isDarkMode ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.8)'
+                  }}
+                >
+                  Zoom & View
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {[
+                    { label: 'Zoom in', key: 'Ctrl/⌘ + +' },
+                    { label: 'Zoom out', key: 'Ctrl/⌘ + -' },
+                    { label: 'Fit to screen', key: 'F' },
+                    { label: 'Reset zoom', key: 'R' }
+                  ].map((shortcut, index) => (
+                    <div key={index} className="flex items-center justify-between p-3 rounded-xl"
+                      style={{
+                        background: isDarkMode 
+                          ? 'rgba(255,255,255,0.03)' 
+                          : 'rgba(255,255,255,0.3)',
+                        backdropFilter: 'blur(20px)',
+                        border: isDarkMode 
+                          ? '1px solid rgba(255,255,255,0.05)' 
+                          : '1px solid rgba(255,255,255,0.2)'
+                      }}
+                    >
+                      <span style={{ color: isDarkMode ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.7)' }}>
+                        {shortcut.label}
+                      </span>
+                      <kbd 
+                        className="px-3 py-1.5 rounded-lg text-sm font-mono"
+                        style={{
+                          background: isDarkMode 
+                            ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
+                            : 'linear-gradient(135deg, rgba(255,255,255,0.4) 0%, rgba(255,255,255,0.2) 100%)',
+                          backdropFilter: 'blur(10px)',
+                          border: isDarkMode 
+                            ? '1px solid rgba(255,255,255,0.1)' 
+                            : '1px solid rgba(255,255,255,0.3)',
+                          color: isDarkMode ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.8)',
+                          boxShadow: isDarkMode
+                            ? 'inset 0 1px 0 rgba(255,255,255,0.1), 0 1px 3px rgba(0,0,0,0.2)'
+                            : 'inset 0 1px 0 rgba(255,255,255,0.5), 0 1px 3px rgba(0,0,0,0.1)'
+                        }}
+                      >
+                        {shortcut.key}
+                      </kbd>
+                    </div>
+                  ))}
                 </div>
               </div>
 
-              <div>
-                <h3 className={`font-semibold mb-3 ${theme.text}`}>Interface</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                  <div className={`flex justify-between ${theme.textSecondary}`}>
-                    <span>Toggle theme</span>
-                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>T</kbd>
-                  </div>
-                  <div className={`flex justify-between ${theme.textSecondary}`}>
-                    <span>Show this help</span>
-                    <kbd className={`px-2 py-1 rounded text-xs ${theme.button}`}>? or H</kbd>
-                  </div>
+              {/* Interface Section */}
+              <div className="space-y-4">
+                <h3 
+                  className="text-lg font-medium"
+                  style={{
+                    color: isDarkMode ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.8)'
+                  }}
+                >
+                  Interface
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {[
+                    { label: 'Toggle theme', key: 'T' },
+                    { label: 'Show this help', key: '? or H' },
+                    { label: 'Toggle edge labels', key: 'L' },
+                    { label: 'Toggle highlight mode', key: 'G' }
+                  ].map((shortcut, index) => (
+                    <div key={index} className="flex items-center justify-between p-3 rounded-xl"
+                      style={{
+                        background: isDarkMode 
+                          ? 'rgba(255,255,255,0.03)' 
+                          : 'rgba(255,255,255,0.3)',
+                        backdropFilter: 'blur(20px)',
+                        border: isDarkMode 
+                          ? '1px solid rgba(255,255,255,0.05)' 
+                          : '1px solid rgba(255,255,255,0.2)'
+                      }}
+                    >
+                      <span style={{ color: isDarkMode ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.7)' }}>
+                        {shortcut.label}
+                      </span>
+                      <kbd 
+                        className="px-3 py-1.5 rounded-lg text-sm font-mono"
+                        style={{
+                          background: isDarkMode 
+                            ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
+                            : 'linear-gradient(135deg, rgba(255,255,255,0.4) 0%, rgba(255,255,255,0.2) 100%)',
+                          backdropFilter: 'blur(10px)',
+                          border: isDarkMode 
+                            ? '1px solid rgba(255,255,255,0.1)' 
+                            : '1px solid rgba(255,255,255,0.3)',
+                          color: isDarkMode ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.8)',
+                          boxShadow: isDarkMode
+                            ? 'inset 0 1px 0 rgba(255,255,255,0.1), 0 1px 3px rgba(0,0,0,0.2)'
+                            : 'inset 0 1px 0 rgba(255,255,255,0.5), 0 1px 3px rgba(0,0,0,0.1)'
+                        }}
+                      >
+                        {shortcut.key}
+                      </kbd>
+                    </div>
+                  ))}
                 </div>
               </div>
 
-              <div className={`text-xs ${theme.textMuted} border-t ${theme.border} pt-4`}>
-                <p><strong>Tip:</strong> Click nodes to explore relationships, drag to reposition, and use the mouse wheel to zoom.</p>
+              {/* Graph Interaction Section */}
+              <div className="space-y-4">
+                <h3 
+                  className="text-lg font-medium"
+                  style={{
+                    color: isDarkMode ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.8)'
+                  }}
+                >
+                  Graph Interaction
+                </h3>
+                <div className="grid grid-cols-1 gap-4">
+                  {[
+                    { label: 'Click node', action: 'Select and show details' },
+                    { label: 'Drag node', action: 'Reposition in force layout' },
+                    { label: 'Mouse wheel', action: 'Zoom in/out' },
+                    { label: 'Click background', action: 'Deselect current node' },
+                    { label: 'Search', action: 'Highlights matching nodes/relations' }
+                  ].map((interaction, index) => (
+                    <div key={index} className="flex items-center justify-between p-3 rounded-xl"
+                      style={{
+                        background: isDarkMode 
+                          ? 'rgba(255,255,255,0.03)' 
+                          : 'rgba(255,255,255,0.3)',
+                        backdropFilter: 'blur(20px)',
+                        border: isDarkMode 
+                          ? '1px solid rgba(255,255,255,0.05)' 
+                          : '1px solid rgba(255,255,255,0.2)'
+                      }}
+                    >
+                      <span 
+                        className="font-medium"
+                        style={{ color: isDarkMode ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.8)' }}
+                      >
+                        {interaction.label}
+                      </span>
+                      <span style={{ color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)' }}>
+                        {interaction.action}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Tip Section */}
+              <div 
+                className="p-4 rounded-xl"
+                style={{
+                  background: isDarkMode 
+                    ? 'linear-gradient(135deg, rgba(147,51,234,0.1) 0%, rgba(59,130,246,0.05) 100%)'
+                    : 'linear-gradient(135deg, rgba(147,51,234,0.06) 0%, rgba(59,130,246,0.03) 100%)',
+                  backdropFilter: 'blur(20px)',
+                  border: isDarkMode 
+                    ? '1px solid rgba(147,51,234,0.2)' 
+                    : '1px solid rgba(147,51,234,0.15)'
+                }}
+              >
+                <p 
+                  className="text-sm leading-relaxed"
+                  style={{ color: isDarkMode ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.7)' }}
+                >
+                  <span className="font-semibold">💡 Pro Tip:</span> Use the relation type highlighting to focus on specific connections, 
+                  and combine it with search to explore complex knowledge graphs more effectively.
+                </p>
               </div>
             </div>
           </div>
